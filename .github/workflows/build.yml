@@ -5,6 +5,7 @@ on:
 
 jobs:
   build:
+    name: Build ESP32-S3 Firmware
     runs-on: ubuntu-latest
 
     container:
@@ -14,16 +15,51 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check uploaded source
+        run: |
+          echo "Repository files:"
+          ls -lah
+          echo
+          echo "Source ZIP:"
+          ls -lh galante_nexus_source.zip
+
       - name: Extract GALANTE NEXUS source
         run: |
+          rm -rf source
           mkdir -p source
+
           unzip -q galante_nexus_source.zip -d source
 
-      - name: Find project
+          echo "Extracted source:"
+          find source -maxdepth 3 -type f | head -100
+
+      - name: Locate ESP-IDF project
         run: |
-          PROJECT_DIR=$(find source -maxdepth 4 -type f -name CMakeLists.txt | head -n 1 | xargs dirname)
+          PROJECT_DIR=$(find source -type f -name CMakeLists.txt \
+            -not -path "*/build/*" \
+            | while read file; do
+                dir=$(dirname "$file")
+                if [ -f "$dir/main/CMakeLists.txt" ]; then
+                  echo "$dir"
+                  break
+                fi
+              done)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Could not find GALANTE NEXUS ESP-IDF project."
+            find source -name CMakeLists.txt -print
+            exit 1
+          fi
+
+          echo "Found project:"
+          echo "$PROJECT_DIR"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found project at: $PROJECT_DIR"
+
+      - name: Show ESP-IDF version
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py --version
 
       - name: Configure ESP32-S3
         run: |
@@ -31,14 +67,54 @@ jobs:
           . /opt/esp/idf/export.sh
           idf.py set-target esp32s3
 
-      - name: Build firmware
+      - name: Build GALANTE NEXUS
         run: |
           cd "$PROJECT_DIR"
           . /opt/esp/idf/export.sh
           idf.py build
 
-      - name: Prepare firmware
+      - name: Verify build output
         run: |
+          echo "Build directory:"
+          ls -lah "$PROJECT_DIR/build"
+
+          echo
+          echo "Bootloader:"
+          ls -lh "$PROJECT_DIR/build/bootloader/bootloader.bin"
+
+          echo
+          echo "Partition table:"
+          ls -lh "$PROJECT_DIR/build/partition_table/partition-table.bin"
+
+          echo
+          echo "Application binaries:"
+          find "$PROJECT_DIR/build" \
+            -maxdepth 1 \
+            -type f \
+            -name "*.bin" \
+            -print
+
+      - name: Find application binary
+        run: |
+          APP_BIN=$(find "$PROJECT_DIR/build" \
+            -maxdepth 1 \
+            -type f \
+            -name "*.bin" \
+            | head -n 1)
+
+          if [ -z "$APP_BIN" ]; then
+            echo "ERROR: Application .bin was not found."
+            exit 1
+          fi
+
+          echo "Application binary:"
+          echo "$APP_BIN"
+
+          echo "APP_BIN=$APP_BIN" >> "$GITHUB_ENV"
+
+      - name: Prepare firmware files
+        run: |
+          rm -rf release
           mkdir -p release
 
           cp "$PROJECT_DIR/build/bootloader/bootloader.bin" \
@@ -47,21 +123,70 @@ jobs:
           cp "$PROJECT_DIR/build/partition_table/partition-table.bin" \
             release/partition-table.bin
 
-          cp "$PROJECT_DIR/build/"*.bin release/galante_nexus.bin
+          cp "$APP_BIN" \
+            release/galante_nexus.bin
 
+          echo "Firmware files prepared:"
+          ls -lh release
+
+      - name: Create merged flash image
+        run: |
           . /opt/esp/idf/export.sh
 
-          esptool.py --chip esp32s3 merge_bin \
+          esptool.py \
+            --chip esp32s3 \
+            merge_bin \
             -o release/galante_nexus_merged.bin \
             --flash_mode qio \
             --flash_freq 80m \
             --flash_size 16MB \
             0x0 "$PROJECT_DIR/build/bootloader/bootloader.bin" \
             0x8000 "$PROJECT_DIR/build/partition_table/partition-table.bin" \
-            0x20000 "$PROJECT_DIR/build/"*.bin
+            0x20000 "$APP_BIN"
 
-      - name: Upload firmware
+          echo
+          echo "Merged firmware created:"
+          ls -lh release/galante_nexus_merged.bin
+
+      - name: Generate firmware information
+        run: |
+          cat > release/FLASH_INFO.txt <<'EOF'
+GALANTE NEXUS
+ESP32-S3 Firmware
+
+MAIN MERGED FIRMWARE:
+galante_nexus_merged.bin
+
+Flash merged firmware at:
+0x00000000
+
+Separate firmware files:
+
+bootloader.bin
+Offset: 0x00000000
+
+partition-table.bin
+Offset: 0x00008000
+
+galante_nexus.bin
+Offset: 0x00020000
+
+Target:
+ESP32-S3
+
+Flash size:
+16 MB
+
+Firmware:
+GALANTE NEXUS
+EOF
+
+          cat release/FLASH_INFO.txt
+
+      - name: Upload GALANTE NEXUS firmware
         uses: actions/upload-artifact@v4
         with:
           name: GALANTE-NEXUS-ESP32-S3-Firmware
           path: release/
+          if-no-files-found: error
+          retention-days: 30
