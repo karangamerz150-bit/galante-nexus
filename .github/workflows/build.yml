@@ -1,1 +1,67 @@
+name: Build GALANTE NEXUS
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    container:
+      image: espressif/idf:release-v5.3
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract GALANTE NEXUS source
+        run: |
+          mkdir -p source
+          unzip -q galante_nexus_source.zip -d source
+
+      - name: Find project
+        run: |
+          PROJECT_DIR=$(find source -maxdepth 4 -type f -name CMakeLists.txt | head -n 1 | xargs dirname)
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found project at: $PROJECT_DIR"
+
+      - name: Configure ESP32-S3
+        run: |
+          cd "$PROJECT_DIR"
+          . /opt/esp/idf/export.sh
+          idf.py set-target esp32s3
+
+      - name: Build firmware
+        run: |
+          cd "$PROJECT_DIR"
+          . /opt/esp/idf/export.sh
+          idf.py build
+
+      - name: Prepare firmware
+        run: |
+          mkdir -p release
+
+          cp "$PROJECT_DIR/build/bootloader/bootloader.bin" \
+            release/bootloader.bin
+
+          cp "$PROJECT_DIR/build/partition_table/partition-table.bin" \
+            release/partition-table.bin
+
+          cp "$PROJECT_DIR/build/"*.bin release/galante_nexus.bin
+
+          . /opt/esp/idf/export.sh
+
+          esptool.py --chip esp32s3 merge_bin \
+            -o release/galante_nexus_merged.bin \
+            --flash_mode qio \
+            --flash_freq 80m \
+            --flash_size 16MB \
+            0x0 "$PROJECT_DIR/build/bootloader/bootloader.bin" \
+            0x8000 "$PROJECT_DIR/build/partition_table/partition-table.bin" \
+            0x20000 "$PROJECT_DIR/build/"*.bin
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: GALANTE-NEXUS-ESP32-S3-Firmware
+          path: release/
